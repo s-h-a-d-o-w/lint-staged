@@ -237,6 +237,12 @@ describe('resolveTaskFn', () => {
     expect(context).toMatchInlineSnapshot(`
       Object {
         "errors": Set {},
+        "events": EventEmitter {
+          "_events": Object {},
+          "_eventsCount": 0,
+          "_maxListeners": undefined,
+          Symbol(kCapture): false,
+        },
         "hasPartiallyStagedFiles": null,
         "output": Array [],
         "quiet": false,
@@ -263,6 +269,12 @@ describe('resolveTaskFn', () => {
     expect(context).toMatchInlineSnapshot(`
       Object {
         "errors": Set {},
+        "events": EventEmitter {
+          "_events": Object {},
+          "_eventsCount": 0,
+          "_maxListeners": undefined,
+          Symbol(kCapture): false,
+        },
         "hasPartiallyStagedFiles": null,
         "output": Array [
           "
@@ -295,6 +307,12 @@ describe('resolveTaskFn', () => {
         "errors": Set {
           Symbol(TaskError),
         },
+        "events": EventEmitter {
+          "_events": Object {},
+          "_eventsCount": 0,
+          "_maxListeners": undefined,
+          Symbol(kCapture): false,
+        },
         "hasPartiallyStagedFiles": null,
         "output": Array [
           "stderr",
@@ -325,6 +343,12 @@ describe('resolveTaskFn', () => {
         "errors": Set {
           Symbol(TaskError),
         },
+        "events": EventEmitter {
+          "_events": Object {},
+          "_eventsCount": 0,
+          "_maxListeners": undefined,
+          Symbol(kCapture): false,
+        },
         "hasPartiallyStagedFiles": null,
         "output": Array [],
         "quiet": true,
@@ -333,7 +357,7 @@ describe('resolveTaskFn', () => {
     `)
   })
 
-  it('should kill a long running task when an error is added to the context', async () => {
+  it('should kill a long running task when an error event is emitted', async () => {
     execa.mockImplementationOnce(() =>
       createExecaReturnValue(
         {
@@ -353,7 +377,7 @@ describe('resolveTaskFn', () => {
     const taskFn = resolveTaskFn({ command: 'node' })
     const taskPromise = taskFn(context)
 
-    context.errors.add({})
+    context.events.emit('lint-staged:error')
 
     jest.runAllTimers()
 
@@ -391,7 +415,7 @@ describe('resolveTaskFn', () => {
     const context = getInitialState()
     const taskPromise = taskFn(context)
 
-    context.errors.add({})
+    context.events.emit('lint-staged:error')
     jest.runAllTimers()
 
     await expect(taskPromise).rejects.toThrowErrorMatchingInlineSnapshot(`"node [KILLED]"`)

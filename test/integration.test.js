@@ -1,6 +1,7 @@
 import path from 'path'
 
 import makeConsoleMock from 'consolemock'
+import execa from 'execa'
 import fs from 'fs-extra'
 import ansiSerializer from 'jest-snapshot-serializer-ansi'
 import normalize from 'normalize-path'
@@ -28,11 +29,17 @@ import { execGit as execGitBase } from '../lib/execGit'
 import lintStaged from '../lib/index'
 
 import { replaceSerializer } from './utils/replaceSerializer'
-import { createTempDir } from './utils/tempDir'
-import { isWindows, isWindowsActions, normalizeWindowsNewlines } from './utils/crossPlatform'
+import {
+  createTempDir,
+  initializeRepo,
+  readFile as readFileBase,
+  appendFile as appendFileBase,
+  writeFile as writeFileBase,
+} from './utils/tempDir'
+import { isWindows, normalizeWindowsNewlines } from './utils/crossPlatform'
 
 jest.setTimeout(20000)
-jest.retryTimes(2)
+// jest.retryTimes(2)
 
 // Replace path like `../../git/lint-staged` with `<path>/lint-staged`
 const replaceConfigPathSerializer = replaceSerializer(
@@ -77,28 +84,9 @@ const fixJsConfig = { config: { '*.js': 'prettier --write' } }
 let tmpDir
 let cwd
 
-const ensureDir = async (inputPath) => fs.ensureDir(path.dirname(inputPath))
-
-// Get file content, coercing Windows `\r\n` newlines to `\n`
-const readFile = async (filename, dir = cwd) => {
-  const filepath = path.isAbsolute(filename) ? filename : path.join(dir, filename)
-  const file = await fs.readFile(filepath, { encoding: 'utf-8' })
-  return normalizeWindowsNewlines(file)
-}
-
-// Append to file, creating if it doesn't exist
-const appendFile = async (filename, content, dir = cwd) => {
-  const filepath = path.isAbsolute(filename) ? filename : path.join(dir, filename)
-  await ensureDir(filepath)
-  await fs.appendFile(filepath, content)
-}
-
-// Write (over) file, creating if it doesn't exist
-const writeFile = async (filename, content, dir = cwd) => {
-  const filepath = path.isAbsolute(filename) ? filename : path.join(dir, filename)
-  await ensureDir(filepath)
-  await fs.writeFile(filepath, content)
-}
+const readFile = async (filename, dir = cwd) => readFileBase(filename, dir)
+const appendFile = async (filename, content, dir = cwd) => appendFileBase(filename, content, dir)
+const writeFile = async (filename, content, dir = cwd) => writeFileBase(filename, content, dir)
 
 // Wrap execGit to always pass `gitOps`
 const execGit = async (args, options = {}) => execGitBase(args, { cwd, ...options })
@@ -110,6 +98,17 @@ const execGit = async (args, options = {}) => execGitBase(args, { cwd, ...option
 const gitCommit = async (options, args = ['-m test']) => {
   const passed = await lintStaged({ cwd, ...options })
   if (!passed) throw new Error('lint-staged failed')
+  await execGit(['commit', ...args], { cwd, ...options })
+}
+const gitCommitWithExeca = async (options, args = ['-m test']) => {
+  try {
+    await execa('node', ['./tmp/bin/lint-staged.js', '--cwd', cwd])
+  } catch (e) {
+    console.log(cwd)
+    console.log(e)
+    throw new Error('lint-staged failed')
+  }
+
   await execGit(['commit', ...args], { cwd, ...options })
 }
 
@@ -149,14 +148,7 @@ describe('lint-staged', () => {
   beforeEach(async () => {
     tmpDir = await createTempDir()
     cwd = normalize(tmpDir)
-    // Init repository with initial commit
-    await execGit('init')
-    await execGit(['config', 'user.name', '"test"'])
-    await execGit(['config', 'user.email', '"test@test.com"'])
-    if (isWindowsActions()) await execGit(['config', 'core.autocrlf', 'input'])
-    await appendFile('README.md', '# Test\n')
-    await execGit(['add', 'README.md'])
-    await execGit(['commit', '-m initial commit'])
+    await initializeRepo(cwd)
 
     if (defaultBranchName === 'UNSET') {
       defaultBranchName = await execGit(['rev-parse', '--abbrev-ref', 'HEAD'])
@@ -246,6 +238,66 @@ describe('lint-staged', () => {
     expect(await execGit(['log', '-1', '--pretty=%B'])).toMatch('initial commit')
     expect(await execGit(['status'])).toEqual(status)
     expect(await readFile('test.js')).toEqual(testJsFileUnfixable)
+  })
+
+  it('Should fail to commit even on Windows machines with low performance', async () => {
+    const pathTo = (relativePath) => {
+      return path.join(__dirname, relativePath)
+    }
+
+    await fs.ensureDir(pathTo('../tmp'))
+    await fs.copy(pathTo('../package.json'), pathTo('../tmp/package.json'))
+    await fs.copy(pathTo('../bin'), pathTo('../tmp/bin'))
+    await fs.copy(pathTo('../lib'), pathTo('../tmp/lib'))
+
+    // Delay statements that previously caused issues on low-performance machines
+    const delayStatement = async (module, statement, delay) => {
+      const code = await fs.readFile(module, 'utf-8')
+      await fs.writeFile(
+        module,
+        code
+          .split('\n')
+          .map((line) =>
+            line.includes(statement)
+              ? `await new Promise((resolve) => setTimeout(resolve, ${delay}));` + line
+              : line
+          )
+          .join('\n')
+      )
+    }
+
+    await delayStatement(pathTo('../tmp/lib/resolveTaskFn.js'), 'await pidTree', 2000)
+    await delayStatement(pathTo('../tmp/lib/gitWorkflow.js'), "execGit(['reset'", 3000)
+
+    // Add unfixable file to commit so `prettier --write` breaks
+    await appendFile('test.js', testJsFileUnfixable)
+    await appendFile('dummy', testJsFileUgly)
+    await appendFile(
+      '.lintstagedrc.js',
+      `
+module.exports = {
+  "*.js": "prettier --write",
+  "dummy": () => "del dummy",
+  "*.{js,ts}": () => "cmd /k cmd",
+}
+`
+    )
+    await execGit(['add', 'test.js', 'dummy'])
+    const initialStatus = await execGit(['status'])
+
+    try {
+      await gitCommitWithExeca()
+    } catch (error) {
+      expect(error.message).toMatchInlineSnapshot(`"lint-staged failed"`)
+    }
+
+    // Something was wrong so the repo is returned to original state
+    expect(await execGit(['rev-list', '--count', 'HEAD'])).toEqual('1')
+    expect(await execGit(['log', '-1', '--pretty=%B'])).toMatch('initial commit')
+    expect(await execGit(['status'])).toEqual(initialStatus)
+    expect(await readFile('test.js')).toEqual(testJsFileUnfixable)
+
+    await fs.remove(pathTo('../tmp'))
   })
 
   it('Should fail to commit entire staged file when there are unrecoverable merge conflicts', async () => {
